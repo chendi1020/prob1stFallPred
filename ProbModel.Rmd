@@ -1,0 +1,420 @@
+---
+title: "PROB1st Modelling (Machine Learning)"
+author: "Di"
+date: "Jan, 2016"
+output: html_document
+---
+
+
+```{r setup, cache = F, echo = F, message = F, warning = F, tidy = F, results='hide'}
+# make this an external chunk that can be included in any file
+library(knitr)
+library(caret)
+library(dplyr)
+options(width = 100)
+opts_chunk$set(message = F, error = F, warning = F, comment = NA, fig.align = 'center', dpi = 100, tidy = F, cache.path = '.cache/', fig.path = 'fig/')
+
+options(xtable.type = 'html')
+knit_hooks$set(inline = function(x) {
+  if(is.numeric(x)) {
+    round(x, getOption('digits'))
+  } else {
+    paste(as.character(x), collapse = ', ')
+  }
+})
+knit_hooks$set(plot = knitr:::hook_plot_html)
+runif(1)
+```
+
+
+### Purpose
+
+ + Find best algorithm to predict incoming students (PAG incoming cohorts) who will be on probation at 1st fall 
+ + Time of prediction : As of the first day of class, therefore, predictors included are admission and other students info as their first day of class
+ + Intepretability might be traded off with better model accuracy
+ 
+ 
+#### Descriptive analyses for data exploration
+
++ probation rate by cohort (End Academic Status <> 'GOOD'): varies from 8-10% in the past 6 cohorts
+```{r, echo=FALSE, cache=T}
+library(dplyr)
+load("S:/Institutional Research/Chen/Sekhar Request/FA Influence on Student Sucess/PAG.Rda")
+PAG %>% mutate(PROB1 = ifelse(PROB1st=='Y', 1,0)) %>% group_by(COHORT) %>% summarise(hc=n(), probrate =mean(PROB1, na.rm=T))
+
+```
+
++ 1. Relationship with PRED_GPA (known predicting factor)
+
++ 1st fall probation by pred_GPA group
++ note : 26% probation cases came from PRED_GPA unknown group
+```{r, echo=FALSE}
+
+addmargins(table(PAG$PredGPAgrp, PAG$PROB1st))
+prop.table(table(PAG$PredGPAgrp, PAG$PROB1st),1)
+prop.table(table(PAG$PredGPAgrp, PAG$PROB1st),2)
+```
+
+
+
+
+**PREDGPA distribution for those on probation extend from 0 to almost 4. To caputer the majority of probation cases using PREDGPA alone means you need to consider all cases for PRED_GPA <=3.5, that's equal to 93% of total population ** 
+
+```{r, echo=FALSE, cache=TRUE}
+library(ggplot2)
+qplot(PRED_GPA, colour=PROB1st, data=PAG, geom = "density",main='predict plot distribution by probation status')
+
+```
+
+
++ Relationship between PRED_GPA and CUM GPA FS1 in general
+
+* Once the PRED_GPA >=3,students are mostly scattered in 'good' (cum GPA FS1 >=2.0) 
+*the overall fit is more like a S shape curve with more variations at either ends
+
+```{r, echo=FALSE, cache=TRUE}
+
+# exclude no credit cases
+PAG1 <- PAG %>% filter(GPAcreditzero=='N')
+p <- ggplot(PAG1, aes(PRED_GPA, CUM_GPA_FS1 ,colour=as.factor(COHORT) ))
+p + geom_jitter()+ geom_smooth()+ geom_hline(yintercept = 2, colour='blue', size=2)+ geom_vline(xintercept = 3, colour='red', size=2)+
+        labs(title='Relationship between 1st Fall Cum GPA and PRED_GPA acorss cohorts- smooth function fit')
+
+```
+
++ Note that there are less than 3% of the incoming population whose MUS GPA credits in the first Fall is Zero, by rule, they were not put on probation regardless of their CUM GPA FS1
+
+**data shows 95% of those zero credit GPA can be found at the first day of class registration **
+
+```{r, echo=F}
+
+sub <- PAG %>% filter(GPAcreditzero=='Y' )
+source("S:/Institutional Research/Chen/R setup/ODBC Connection.R")
+PLVT1st <- sqlQuery(SISFrzn, "select distinct Pid as PID, Frzn_Term_Code as TERM_FS1,Msu_Lt_Gpa_Credits as Zero
+                           from SISPLVT_FIRSTDAY
+                           where Student_Level_Code='UN' and System_Rgstn_Status in ('C','R','E','W')
+                          and term_Seq_id in (1104,1114,1124,1134,1144,1154) and Msu_Lt_Gpa_Credits=0
+                 ")
+
+sub <- merge(sub, PLVT1st, by=c('PID', 'TERM_FS1'), all.x = T)
+
+sum(sub$Zero==0, na.rm = T)/nrow(sub)
+```
+
+
+
+
+### In addition to predict GPA, other factors considered
+
++ FW courses registration: 
++ DFW course : DFW table, courses with at least 100 enrollees and DFW rates >=10%
++ Using the first day class SISPCRS, looking for number of courses that the student registered are DFW courses. Calculate the DFW course % (pctdfw)
+**t test shows the Probation population has higher dfw course %**
+```{r, echo=F}
+tapply(PAG$pctdfw, PAG$PROB1st, function(x){summary(x)} )
+t.test(PAG$pctdfw~ PAG$PROB1st)
+
+```
+
+
++ 2). AOP dates:
++ dategrp : numbers of days that AOP happened prior to the first day of class
+
+**AOP date prior to first day of class associated with PROB1st signifcantly**
+```{r, echo=F}
+prop.table(table(PAG$dategrp, PAG$PROB1st),1)
+chisq.test(table(PAG$dategrp, PAG$PROB1st))
+```
+
+
++ 3). residence hall:
++ using SISPADR_FIRSTDAY to find out which residence hall the students lived as first day of class. using HO adr1 text description to group the adress into : Brody, North, East,River Trail, south, offcampus
+
+**residence as first day of class associated with PROB1st signficantly **
+
+```{r, echo=F}
+prop.table(table(PAG$residhall, PAG$PROB1st),1)
+chisq.test(table(PAG$residhall, PAG$PROB1st))
+
+```
+
++ 4) AP credits
++ using SISPTRN_FIRSTDAY AP credits through ETSADPL
+
+**AP credits associated with PROB1st signficantly**
+```{r, echo=F}
+t.test(APcredit ~ PROB1st, PAG)
+
+```
+
+
++ 5) MTH replacement score
++maxscore : max math replacement score (10% missing)
+**math replacement score associated with PROB1st signficantly**
+```{r, echo=F}
+summary(PAG$maxscore)
+t.test(maxscore ~ PROB1st, PAG)
+
+```
+
+
+
+
++ 6) PRED_GPA grp within major selected
++ calcuate whether one's PRED_GPA is less or equal to the 1st quantile of the students in the same first majr
+
+
+**with PRED_GPA higher than the 1st quantile of PRED_GPA among students in the same first major lead to lower Probation rate**
+```{r, echo=F}
+
+prop.table(table(PAG$lowermajr, PAG$PROB1st),1)
+chisq.test(table(PAG$lowermajr, PAG$PROB1st))
+t.test(lowermajrnum~ PROB1st, PAG)
+```
+
+
++ 7) Others : Begin trans credits, gender, race, First Gen, ACT composite, High School distance from MSU, Residency, honor via admission etc.
+
+
+
+
+
+
+### Modelling : Data Partition
+
++ Split the past 6 PAG cohorts into training (60%) and testing (25%) and validation (15%)
+
+```{r, echo=F}
+#because honor has honor after matriculation recode
+PAG$HONORAD <- as.factor( ifelse(PAG$HONOR2=='HONOR_Fall', 'Y', 'N'))
+
+#mark those credit =0 as first day
+Zero <- sub %>% filter(Zero==0) %>% select(PID)
+
+PAG <- PAG %>% mutate(czero= ifelse(PID %in% Zero$PID ,'Y' ,'N'))
+
+
+#PAG.1 <- PAG %>% filter( GPAcreditzero=='N')
+
+# select relevant var
+
+PAG.1 <-PAG %>% select(CUM_GPA_FS1,PROB1st, PRED_GPA, GENDER,ETHNICITY, ACT_COMPOSITE,ATHLETE,HONOR,ACT_WRITING,
+                       pctdfw,  maxscore ,maxscoregrp,tdebt ,tdebtgrp ,                       
+                      BEGIN_TRANS_CREDITS ,IA.Other ,IAOtherGrp, IA.Need, IANeedGrp,Hispanic,
+                      Black , FIRST_GEN ,Netprice, Netpricegrp ,ATMPT_HOUR_FS1 , outstate , Adr2 ,STEM_FIRST, ADMITColl_FS1,
+                      dategrp,residhall, CITIZENSHIP,  EFC_1ST_YR, low1, low2, AOPdaydiff, 
+                      APcredit, Appt_Group, PELL_1ST_YR,FIRST_GEN_FA_1ST_YR,
+                      SEOG_1ST_YR,COLLEGE_FIRST_NAME,PARENT_1F_ED_LEVEL_FA_1ST_YR,PARENT_2M_ED_LEVEL_FA_1ST_YR,
+                      lowermajr,lowermajrnum, dist, HSRP,ENTITY_NAME,HONORAD, czero)
+
+
+
+library(caret)
+
+
+ #apply(PAG.1, 2, function(x) {sum(is.na(x)) })
+
+
+```
+
+
+
+
+```{r, echo=F}
+
+
+
+set.seed(1020)
+int <- createDataPartition(PAG.1$CUM_GPA_FS1, p=0.85, list=F)
+train <- PAG.1[int,]
+validate <- PAG.1[-int,]
+
+intrain <- createDataPartition(train$CUM_GPA_FS1, p=60/85, list = F)
+training <- train[intrain,]
+testing <- train[-intrain,]
+
+#apply(training, 2, function(x) {sum(is.na(x)) })
+
+```
+
+
+### Missing imputation : for predictors with missing values, we want to use various method to impute the missing first
+
+
++ use the mean/meidan to impute missing for ACT composite and HS distance 
+```{r}
+#training$Netpricecomp <- ifelse(is.na(training$Netprice), median(training$Netprice, na.rm = T), training$Netprice)
+#training$tdebtcomp <- ifelse(is.na(training$tdebt), 0, training$tdebt)
+training$Actcomp <- ifelse(is.na(training$ACT_COMPOSITE), mean(training$ACT_COMPOSITE, na.rm=T), training$ACT_COMPOSITE)
+training$distcomp <- ifelse(is.na(training$dist), median(training$dist, na.rm = T), training$dist)
+
+```
+
+
+
++ use k-nearest neighborhood algorithm to impute for missing PRED_GPA
++ note knn automatically standardized the variable
+```{r, cache=T}
+
+trainobj <-training %>% select(GENDER, ETHNICITY, ENTITY_NAME, HSRP, HONORAD, FIRST_GEN,BEGIN_TRANS_CREDITS, PRED_GPA, distcomp, Actcomp)
+varPres <- preProcess(trainobj,method = 'knnImpute' )
+PREDGPAcomp <- predict(varPres, trainobj)$PRED_GPA
+
+training <- cbind(training,PREDGPAcomp)
+
+#convert the scale back
+training$PREDGPAcomprev <- mean(training$PRED_GPA,na.rm = T)+ sd(training$PRED_GPA,na.rm = T)*PREDGPAcomp
+
+```
+
+
+
+### Modelling Steps : try multiple algorithms to predict 1st Fall GPA and then use the testing set to evaulate the accuracy of differet algorithms. The best model will then be applied to validation set to get the final estimate of out-of-sample error
+
+
+
++ classification tree fit 
+
+
+```{r}
+library(rpart)
+library(caret)
+set.seed(1020)
+
+traintree <- training %>% select(CUM_GPA_FS1,GENDER, ETHNICITY, HONORAD, ACT_WRITING, pctdfw, maxscore,BEGIN_TRANS_CREDITS,
+                                FIRST_GEN, outstate,STEM_FIRST,ADMITColl_FS1, dategrp, residhall, CITIZENSHIP,EFC_1ST_YR, low2,AOPdaydiff, APcredit,PELL_1ST_YR,COLLEGE_FIRST_NAME,
+                                lowermajr, lowermajrnum, distcomp, HSRP, PREDGPAcomp, Actcomp)
+
+tree <- rpart(traintree$CUM_GPA_FS1~., data=traintree, control=rpart.control(cp=0.001 ,maxdepth  =6))
+
+library(partykit)
+
+tree1 <- as.party(tree)
+plot(tree1)
+
+
+
+```
+
+
++ classification tree test against the testing set 
++ manual choose the pred first term GPA <2.7 as the predicted probation unless first day gpa credit=0
+
+```{r}
+#compute PREDGPA comp
+testing$Actcomp <- ifelse(is.na(testing$ACT_COMPOSITE), mean(training$ACT_COMPOSITE, na.rm=T), testing$ACT_COMPOSITE)
+testing$distcomp <- ifelse(is.na(testing$dist), median(training$dist, na.rm = T), testing$dist)
+
+PREDGPAcomp <- predict(varPres, testing)$PRED_GPA
+testing <- cbind(testing, PREDGPAcomp)
+
+#testing$Netpricecomp <- ifelse(is.na(testing$Netprice), median(training$Netprice, na.rm = T), testing$Netprice)
+#testing$tdebtcomp <- ifelse(is.na(testing$tdebt), 0, testing$tdebt)
+
+
+
+pred1 <- predict(tree, testing)
+prediction <-  as.factor( ifelse(testing$czero=='Y', 'N' ,ifelse(pred1<2.7,'Y','N')  )      )
+
+testing$PROB1st <- relevel(testing$PROB1st, 'Y')
+
+prediction <- relevel(prediction, 'Y')
+confusionMatrix(prediction, testing$PROB1st)
+```
+
+
+
+
++ Gradient Boosting algorithm fits the training set
++ confusion matrix in testing set for gbm is better than classfication tree
+```{r, cache=T}
+
+boost<- train(CUM_GPA_FS1 ~ PREDGPAcomp + HONORAD + pctdfw + BEGIN_TRANS_CREDITS + COLLEGE_FIRST_NAME +lowermajr+outstate +    STEM_FIRST+ETHNICITY+dategrp+distcomp+Actcomp+GENDER+maxscoregrp+FIRST_GEN+residhall , method='gbm',data=training, verbose=F)
+varImp(boost)
+```
+
+
++ use gbm model to test against testing set (same predict 1st term GPA for probation cutoff unless first day gpa credit=0)
+```{r}
+
+predbs <- predict(boost, testing)
+predictionbs <- as.factor( ifelse(testing$czero=='Y', 'N' ,ifelse(predbs<2.7,'Y','N')  )      )
+
+predictionbs <- relevel(predictionbs, 'Y')
+confusionMatrix(predictionbs, testing$PROB1st)
+
+```
+
+
+
++ random forest fits the training set
++ Due to the computing speed, choose number of tree =50, needs to consider to increase ntree later
+
+```{r, cache=T}
+set.seed(1020)
+library(randomForest)
+trainobj <- training %>% select(GENDER, ETHNICITY, HONORAD, pctdfw,  BEGIN_TRANS_CREDITS,maxscoregrp,dategrp, 
+                                FIRST_GEN, outstate,STEM_FIRST,ADMITColl_FS1,  CITIZENSHIP,COLLEGE_FIRST_NAME,
+                                lowermajr, distcomp, PREDGPAcomp, Actcomp)
+rf1 <- randomForest(x=trainobj, y=training$CUM_GPA_FS1, data=training, ntree=50)
+
+#variable importance
+importance(rf1)
+
+```
+
+
++ use random forest algorithm to test against testing set (same predict 1st term GPA for probation cutoff unless first day gpa credit=0)
++ balance model accuracy is slightly better than gbm model but with better sensitivity 
+
+```{r}
+
+
+testingrf <- testing %>% select(GENDER, ETHNICITY, HONORAD, pctdfw,  BEGIN_TRANS_CREDITS,maxscoregrp, dategrp,
+                                FIRST_GEN, outstate,STEM_FIRST,ADMITColl_FS1,  CITIZENSHIP,COLLEGE_FIRST_NAME,
+                                lowermajr, distcomp, PREDGPAcomp, Actcomp, czero)
+
+predrf <- predict(rf1, testingrf)
+predictionrf <- as.factor( ifelse(testing$czero=='Y', 'N' ,ifelse(predrf<2.7,'Y','N')  )      )
+
+
+predictionrf <- relevel(predictionrf ,'Y' )
+confusionMatrix(predictionrf, testing$PROB1st)
+```
+
+
+
+
++ final testing, choose to use random forest in the validation set to get an estimate on out-of-sample error
++ Blanced accuracy rate in the validation set : 69%
++ Sensivity rate is 57%
+```{r, cache=T}
+
+#do imputation on validation set using the training model
+validate$Actcomp <- ifelse(is.na(validate$ACT_COMPOSITE), mean(training$ACT_COMPOSITE, na.rm=T), validate$ACT_COMPOSITE)
+validate$distcomp <- ifelse(is.na(validate$dist), median(training$dist, na.rm = T), validate$dist)
+
+PREDGPAcomp <- predict(varPres, validate)$PRED_GPA
+validate <- cbind(validate, PREDGPAcomp)
+
+
+
+
+
+vd <- validate %>% select(GENDER, ETHNICITY, HONORAD, pctdfw,  BEGIN_TRANS_CREDITS,maxscoregrp, dategrp,
+                                FIRST_GEN, outstate,STEM_FIRST,ADMITColl_FS1,  CITIZENSHIP,COLLEGE_FIRST_NAME,
+                                lowermajr, distcomp, PREDGPAcomp, Actcomp, czero)
+
+predvt <- predict(rf1, vd)
+predictionvt <- as.factor( ifelse(vd$czero=='Y', 'N' ,ifelse(predvt<2.7,'Y','N')  )      )
+
+predictionvt  <- relevel(predictionvt , 'Y')
+validate$PROB1st <- relevel(validate$PROB1st, 'Y')
+confusionMatrix(predictionvt, validate$PROB1st)
+```
+
+
+### Note : With knn imputation on predict GPA and the registration records as of the 1st day of class, the Random Forest algorithm  predicts the probation on all incoming students (even with PRED_GPA missing). 
+### Future consideration : a stacked model with rf and gbm combination
+
+
